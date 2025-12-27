@@ -66,8 +66,8 @@ public:
   ADS126x_7semi(uint8_t drdy = 6, uint8_t cs = 7, uint8_t start = 5, uint8_t pwdn = 4)
     : _drdy(drdy), _cs(cs), _start(start), _pwdn(pwdn) {}
 
-  // Initialize ADS1262 with default setup
-  bool begin();
+  // Initialize ADS1262/3 with default setup and optional custom SPI pins
+  bool begin(int8_t sck = -1, int8_t miso = -1, int8_t mosi = -1);
 
   // Read last voltage conversion
   float readVoltage();

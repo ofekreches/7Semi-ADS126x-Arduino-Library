@@ -16,18 +16,24 @@
 // Constructor with optional pin configuration handled in header
 
 /**
- * @brief Initialize ADS1262 and SPI interface
+ * @brief Initialize ADS1262/3 and SPI interface
  */
-bool ADS126x_7semi::begin() {
-  pinMode(_drdy, INPUT);
+bool ADS126x_7semi::begin(int8_t sck, int8_t miso, int8_t mosi) {
+  // DRDY is open-drain; enable pull-up so it idles HIGH
+  pinMode(_drdy, INPUT_PULLUP);
   pinMode(_cs, OUTPUT);
   pinMode(_start, OUTPUT);
   pinMode(_pwdn, OUTPUT);
 
-  SPI.begin();
+  // Allow custom SPI pins on ESP32 if provided
+  if (sck != -1 || miso != -1 || mosi != -1) {
+    SPI.begin(sck, miso, mosi, _cs);
+  } else {
+    SPI.begin();
+  }
   SPI.setBitOrder(MSBFIRST);
   SPI.setDataMode(SPI_MODE1);
-  SPI.setClockDivider(SPI_CLOCK_DIV8);
+  SPI.setClockDivider(SPI_CLOCK_DIV4);  // faster SPI for throughput
 
   int8_t device_id = readRegister(ID_REG);
   if ((device_id >> 4) != DEVICE_ID)
@@ -41,9 +47,10 @@ bool ADS126x_7semi::begin() {
   // Power config: Enable internal reference (bit 0) and VBIAS (bit 1)
   writeRegister(POWER, 0x11);
 
-  writeRegister(INTERFACE, 0x05);  // Disable CRC, status always appended
-  writeRegister(MODE0, 0x00);      // Normal mode
-  writeRegister(MODE1, 0x80);      // Filter setting
+  writeRegister(INTERFACE, 0x00);  // CRC off, no status byte (shortest frame)
+  // MODE0 DR=0x09 (~1.2 kSPS on ADS1263 ADC1). Bump to 0x0A/0x0B if you need faster.
+  writeRegister(MODE0, 0x09);
+  writeRegister(MODE1, 0x00);      // SINC1 (fastest, minimal digital filtering)
   writeRegister(MODE2, 0x06);      // PGA gain = 1
   writeRegister(INPMUX, 0x01);     // Default input mux
   writeRegister(OFCAL0, 0x00);     // Offset calibration
@@ -129,12 +136,12 @@ void ADS126x_7semi::sendCommand(uint8_t cmd) {
 }
 
 /**
- * @brief Read 5-byte ADC result
+ * @brief Read ADC result (4 data bytes, status disabled)
  */
 char* ADS126x_7semi::readData() {
-  static char buffer[6];
+  static char buffer[4];
   digitalWrite(_cs, LOW);
-  for (int i = 0; i < 6; ++i) {
+  for (int i = 0; i < 4; ++i) {
     buffer[i] = SPI.transfer(CONFIG_SPI_MASTER_DUMMY);
   }
   digitalWrite(_cs, HIGH);
@@ -145,17 +152,22 @@ char* ADS126x_7semi::readData() {
  * @brief Read raw voltage from last conversion
  */
 float ADS126x_7semi::readVoltage() {
-  if (digitalRead(_drdy) == LOW) {
-    char* raw = readData();
-    long result = ((uint32_t)(uint8_t)raw[1] << 24) |
-                  ((uint32_t)(uint8_t)raw[2] << 16) |
-                  ((uint32_t)(uint8_t)raw[3] << 8) |
-                  (uint8_t)raw[4];
-
-    float resolution = _vref / pow(2, 31);
-    return (float)(int32_t)result * resolution;
+  // Wait briefly for DRDY to drop; avoid missing short pulses at higher data rates
+  unsigned long start = micros();
+  while (digitalRead(_drdy) != LOW) {
+    if (micros() - start > 2000) {
+      return NAN;
+    }
   }
-  return NAN;
+
+  char* raw = readData();
+  long result = ((uint32_t)(uint8_t)raw[0] << 24) |
+                ((uint32_t)(uint8_t)raw[1] << 16) |
+                ((uint32_t)(uint8_t)raw[2] << 8) |
+                (uint8_t)raw[3];
+
+  float resolution = _vref / pow(2, 31);
+  return (float)(int32_t)result * resolution;
 }
 
 /**
@@ -168,17 +180,21 @@ float ADS126x_7semi::readDifferential(uint8_t ain_pos, uint8_t ain_neg) {
   sendCommand(START);
   delay(100);
 
-  if (digitalRead(_drdy) == LOW) {
-    char* raw = readData();
-    long result = ((uint32_t)(uint8_t)raw[1] << 24) |
-                  ((uint32_t)(uint8_t)raw[2] << 16) |
-                  ((uint32_t)(uint8_t)raw[3] << 8) |
-                  (uint8_t)raw[4];
-
-    float resolution = _vref / pow(2, 31);
-    return (float)(int32_t)result * resolution;
+  unsigned long start = micros();
+  while (digitalRead(_drdy) != LOW) {
+    if (micros() - start > 2000) {
+      return NAN;
+    }
   }
-  return NAN;
+
+  char* raw = readData();
+  long result = ((uint32_t)(uint8_t)raw[0] << 24) |
+                ((uint32_t)(uint8_t)raw[1] << 16) |
+                ((uint32_t)(uint8_t)raw[2] << 8) |
+                (uint8_t)raw[3];
+
+  float resolution = _vref / pow(2, 31);
+  return (float)(int32_t)result * resolution;
 }
 
 /**
